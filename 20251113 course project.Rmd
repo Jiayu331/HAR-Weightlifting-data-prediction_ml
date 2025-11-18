@@ -1,0 +1,215 @@
+---
+title: "20251113 course project"
+author: "Jiayu"
+date: "2025-11-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+#1. open the libraries
+```{r}
+library(caret)
+library(tidyverse)
+library(skimr)
+library(pdp)
+library(patchwork)
+```
+#2. import the datasets, fill in NAs
+```{r}
+training <- read.csv("./pml-training.csv", na = c("", " ", "NA", "N/A", "NULL"))
+testing <- read.csv("./pml-testing.csv", na = c("", " ", "NA", "N/A", "NULL"))
+```
+#3. understand the training data: get a basic idea with summary(); check missing values with is.na().
+```{r}
+summary(training)
+```
+
+```{r}
+colMeans(is.na(training)) |> 
+  round(3) |>
+  sort(decreasing = TRUE)
+```
+#4. data preprocessing: remove columns with over 95% missing values and rows that are non-predictive; check near zero variance columns; check collinearity; check class balance; check overall data distribution
+```{r}
+training <- training[,colMeans(is.na(training)) < 0.95] |>
+  select(-c(X, user_name, raw_timestamp_part_1, raw_timestamp_part_2, cvtd_timestamp, new_window, num_window))
+
+dim(training)
+sum(is.na(training))
+```
+```{r}
+nzv <- nearZeroVar(training)
+nzv
+```
+```{r}
+training_numeric <- training |>
+  select(where(is.numeric))
+
+cor_matrix <- cor(training_numeric)
+findCorrelation(cor_matrix, cutoff=0.9)
+```
+```{r}
+pairs(training_numeric[,c(10,1,9,8,31,33,18)])
+```
+```{r}
+table(training$classe)
+```
+```{r}
+skim(training)
+```
+```{r}
+training_numeric |>
+  pivot_longer(everything()) |>
+  ggplot(aes(value)) +
+  geom_histogram(bins=20) +
+  facet_wrap(~name, scales="free") +
+  theme_bw()
+```
+#5. apply the same cleaning procedures to testing set
+```{r}
+common_cols <- intersect(names(training), names(testing))
+
+testing <- testing[,common_cols]
+```
+#6. split the training set into train and validation set
+```{r}
+inTrain <- createDataPartition(y=training$classe, p=0.75, list=FALSE)
+train <- training[inTrain,]
+validation <- training[-inTrain,]
+```
+```{r}
+dim(train)
+dim(validation)
+dim(testing)
+```
+#7. set k-fold cross-validation as train control, train two models (random forest and GBM) and compare accuracy
+```{r}
+set.seed(123)
+
+train_control <- trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  savePredictions = "final"
+)
+
+model_RF <- train(classe~., data=train, method="rf", trControl=train_control)
+
+model_GBM <- train(classe~., data=train, method="gbm", trControl=train_control)
+```
+```{r}
+model_RF$results$Accuracy
+model_GBM$results$Accuracy
+```
+#Random Forest is selected as the ideal method with a much higher in-sample accuracy.
+#8. apply the model on the validation set, visualize model results (confusion matrix, accuracy rate, variable importance)
+```{r}
+pred <- predict(model_RF, newdata=validation)
+
+validation$classe <- factor(validation$classe, levels=levels(pred))
+
+cm <- confusionMatrix(pred, validation$classe)
+cm_df <- as.data.frame(cm$table)
+```
+
+```{r}
+cm_plot <- ggplot(cm_df, aes(Reference, Prediction, fill=Freq)) +
+  geom_tile() +
+  geom_text(aes(label=Freq)) +
+  scale_fill_gradient() +
+  theme_bw() +
+  ggtitle("Confusion Matrix for Validation Data") +
+  theme(title = element_text(face="bold"))
+
+print(cm_plot)
+```
+```{r}
+cm_validation <- cm
+Accuracy_validation <- cm$overall["Accuracy"]
+ErrorRate <- 1-Accuracy_validation
+print(cm_validation)
+paste0("The accuracy rate for the validation set is ", Accuracy_validation, ".")
+paste0("The Out-of-Sample error rate is ", ErrorRate, ".")
+```
+#The model hits a very high accuracy rate on the validation set as well.
+```{r}
+varImp_obj <- varImp(model_RF)
+VarImpPlot <- plot(varImp_obj, top=20)
+print(VarImpPlot)
+```
+#Variable importance plot illustrates that the top three predictors are roll_belt, pitch_forearm and yaw_belt.
+```{r}
+pdp_rollbelt <- partial(
+  object = model_RF,
+  pred.var = "roll_belt",
+  train = train,
+  type = "classification"
+)
+```
+```{r}
+p1 <- autoplot(pdp_rollbelt) +
+  theme_minimal()
+  ylab("Classe Probability")
+```
+```{r}
+pdp_pitchforearm <- partial(
+  object = model_RF,
+  pred.var = "pitch_forearm",
+  train = train
+)
+```
+```{r}
+p2 <- autoplot(pdp_pitchforearm) +
+  theme_minimal() +
+  ylab("Classe Probability")
+```
+```{r}
+pdp_yawbelt <- partial(
+  object = model_RF,
+  pred.var = "yaw_belt",
+  train = train
+)
+```
+```{r}
+p3 <- autoplot(pdp_yawbelt) +
+  theme_minimal() +
+  ylab("Classe Probability")
+```
+```{r}
+pdp_all <- p1 / (p2 | p3)
+pdp_all <- pdp_all + plot_annotation(
+  title = "Partial Dependence Plots for Top 3 Variables",
+  theme = theme(plot.title = element_text(size=16, face="bold")))
+pdp_all
+```
+#The partial dependence plot shows how predictions variate with the changing parameters of the top three predictors.
+#9. generate predictions for testing set
+```{r}
+pred_test <- predict(model_RF, newdata=testing)
+pred_test
+```
+
+
+
